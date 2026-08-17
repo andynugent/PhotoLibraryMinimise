@@ -33,6 +33,13 @@
     Optional. If given, the download must match this SHA-256 or the script aborts.
     (The script always prints the computed hash so you can pin it next time.)
 
+.PARAMETER Minimal
+    After extraction, delete the redundant standalone utility exes (compare,
+    composite, conjure, identify, mogrify, montage, stream) - each is a full
+    ~30 MB static copy, and magick.exe already performs all of them via
+    subcommands (e.g. 'magick identify'). Cuts the folder from ~240 MB to ~32 MB.
+    Can also be run against an already-installed copy without re-downloading.
+
 .PARAMETER Force
     Re-download and re-extract even if a working copy already exists.
 
@@ -43,6 +50,14 @@
 .EXAMPLE
     .\Get-PortableImageMagick.ps1 -Version 7.1.2-29
     # pin a fixed, reproducible version
+
+.EXAMPLE
+    .\Get-PortableImageMagick.ps1 -Minimal
+    # newest release, then trim to ~32 MB (magick.exe + config only)
+
+.EXAMPLE
+    .\Get-PortableImageMagick.ps1 -Minimal   # against an existing install
+    # trims an already-downloaded copy in place, no re-download
 #>
 
 [CmdletBinding()]
@@ -52,6 +67,7 @@ param(
     [string] $Quantum = 'Q16-HDRI',
     [string] $DestinationRoot,
     [string] $ExpectedSha256,
+    [switch] $Minimal,
     [switch] $Force
 )
 
@@ -77,6 +93,21 @@ $variant = if ($Quantum -eq 'Q8') { "Q8-$arch" } else { "$Quantum-$arch" }
 $tar = (Get-Command tar.exe -ErrorAction SilentlyContinue).Source
 if (-not $tar) {
     throw "tar.exe (bsdtar) not found. It ships with Windows 10/11. On older Windows, install 7-Zip and extract the .7z manually."
+}
+
+# Delete the redundant standalone utility exes; magick.exe does their jobs.
+function Remove-RedundantUtilities {
+    param([string] $Dir)
+    $victims = Get-ChildItem -LiteralPath $Dir -Filter *.exe -File |
+        Where-Object { $_.Name -ne 'magick.exe' }
+    if (-not $victims) {
+        Write-Host "  Already minimal (only magick.exe present)." -ForegroundColor DarkGray
+        return
+    }
+    $freed = ($victims | Measure-Object Length -Sum).Sum
+    $victims | Remove-Item -Force
+    Write-Host ("  Removed {0} utility exe(s); freed {1:N0} MB (magick.exe covers them via subcommands)." -f `
+        $victims.Count, ($freed / 1MB)) -ForegroundColor DarkGray
 }
 
 function Invoke-GitHubJson {
@@ -127,6 +158,10 @@ if ((Test-Path -LiteralPath $existing) -and -not $Force) {
     $have = if (Test-Path -LiteralPath $verFile) { (Get-Content -LiteralPath $verFile -Raw).Trim() } else { '(unknown)' }
     if ($have -eq $tag) {
         Write-Host "ImageMagick $tag already present at $InstallDir. Use -Force to reinstall." -ForegroundColor Green
+        if ($Minimal) {
+            Write-Host "Trimming existing install to minimal..." -ForegroundColor Cyan
+            Remove-RedundantUtilities -Dir $InstallDir
+        }
         Write-Host "magick.exe: $existing"
         return
     }
@@ -202,6 +237,14 @@ $avifLine = ($formats | Select-String -Pattern '^\s*AVIF')
 $avifWrite = $avifLine -and ($avifLine.ToString() -match 'rw')
 Write-Host ("  HEIC (read)  : {0}" -f $(if ($heic) {'yes'} else {'NO'})) -ForegroundColor $(if ($heic){'Green'}else{'Red'})
 Write-Host ("  AVIF (write) : {0}" -f $(if ($avifWrite) {'yes'} else {'NO'})) -ForegroundColor $(if ($avifWrite){'Green'}else{'Yellow'})
+
+if ($Minimal) {
+    Write-Host "Trimming to minimal (magick.exe only)..." -ForegroundColor Cyan
+    Remove-RedundantUtilities -Dir $InstallDir
+}
+
+$finalSize = (Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Measure-Object Length -Sum).Sum
+Write-Host ("  Folder size  : {0:N0} MB" -f ($finalSize / 1MB)) -ForegroundColor DarkGray
 
 Write-Host "`nDone." -ForegroundColor Green
 Write-Host "Portable ImageMagick $tag is at:" -ForegroundColor Green

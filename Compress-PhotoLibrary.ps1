@@ -149,6 +149,7 @@ if (-not $MagickPath) {
 if (-not (Test-Path -LiteralPath $MagickPath)) {
     throw "MagickPath not found: $MagickPath"
 }
+Write-Host "Using ImageMagick: $MagickPath" -ForegroundColor DarkGray
 
 $SourceFolder = (Resolve-Path -LiteralPath $SourceFolder).Path
 if (-not (Test-Path -LiteralPath $SourceFolder -PathType Container)) {
