@@ -80,7 +80,14 @@
     How many files to process between manifest checkpoints. Default 500.
 
 .PARAMETER MagickPath
-    Full path to magick.exe if it is not on PATH.
+    Full path to magick.exe if it is not on PATH. If omitted, the script looks
+    for a portable copy at <ScriptFolder>\tools\ImageMagick\magick.exe; if that
+    is missing it auto-runs Get-PortableImageMagick.ps1 to download one (see
+    -NoDownload), and finally falls back to magick on PATH.
+
+.PARAMETER NoDownload
+    Do not auto-download a portable ImageMagick when none is found; use magick on
+    PATH instead (or fail with guidance if PATH has none).
 
 .EXAMPLE
     # First, estimate how big the phone copy will be at these settings:
@@ -117,7 +124,8 @@ param(
     [switch] $Mirror,
     [int] $ThrottleLimit = [Environment]::ProcessorCount,
     [ValidateRange(1, 100000)] [int] $ChunkSize = 500,
-    [string] $MagickPath
+    [string] $MagickPath,
+    [switch] $NoDownload
 )
 
 $ErrorActionPreference = 'Stop'
@@ -131,17 +139,29 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 }
 
 if (-not $MagickPath) {
-    # 1) Prefer a portable copy placed next to this script by
-    #    Get-PortableImageMagick.ps1 (tools\ImageMagick\magick.exe).
-    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-    $portable  = Join-Path $scriptDir 'tools\ImageMagick\magick.exe'
+    $scriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $portable   = Join-Path $scriptDir 'tools\ImageMagick\magick.exe'
+    $downloader = Join-Path $scriptDir 'Get-PortableImageMagick.ps1'
+
+    # 1) If no portable copy exists yet, auto-download one via the helper script
+    #    (unless -NoDownload). This makes the tool self-bootstrapping.
+    if (-not (Test-Path -LiteralPath $portable) -and -not $NoDownload -and (Test-Path -LiteralPath $downloader)) {
+        Write-Host "Portable ImageMagick not found - fetching it with Get-PortableImageMagick.ps1..." -ForegroundColor Yellow
+        try {
+            & $downloader -Minimal
+        } catch {
+            Write-Warning "Automatic ImageMagick download failed: $($_.Exception.Message)"
+        }
+    }
+
+    # 2) Prefer the portable copy; otherwise fall back to magick on PATH.
     if (Test-Path -LiteralPath $portable) {
         $MagickPath = $portable
     } else {
-        # 2) Fall back to magick on PATH.
         $cmd = Get-Command magick -ErrorAction SilentlyContinue
         if (-not $cmd) {
-            throw "ImageMagick 'magick.exe' was not found. Run Get-PortableImageMagick.ps1 to download a portable copy, install ImageMagick 7, or pass -MagickPath."
+            $hint = if ($NoDownload) { 'Remove -NoDownload to auto-download it, ' } else { 'Run Get-PortableImageMagick.ps1 to download a portable copy, ' }
+            throw "ImageMagick 'magick.exe' was not found. $hint" + "install ImageMagick 7, or pass -MagickPath."
         }
         $MagickPath = $cmd.Source
     }
