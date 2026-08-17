@@ -66,6 +66,7 @@ automatically (~31 MB) before starting. Subsequent runs reuse it.
 | `-MaxPixels` | `2048` | Longest-edge limit in pixels. Larger images shrink to fit; smaller are left untouched; aspect ratio preserved. |
 | `-Quality` | `85` | Encoder quality 1–100. Scales differ per codec — AVIF ~55–63 ≈ JPEG ~85 visually, at a fraction of the size. |
 | `-OutputFormat` | `same` | `same` keeps each source's format/extension. Or force one: `jpg`, `avif`, `heic`*, `webp`, `png`, `jxl`, `tiff`. Base filename is kept; extension changes. |
+| `-AvifSpeed` | `-1` | AVIF/HEIC encoder effort (`0`=slowest/smallest … `9`=fastest/largest). `-1` keeps the encoder's fast default. Lower = smaller files but many times more CPU per image. Ignored for non-AVIF/HEIC output. See **Tuning AVIF speed** below. |
 | `-FullRefresh` | off | Ignore the manifest and reprocess everything, overwriting the destination. |
 | `-EstimateOnly` | off | Don't process; sample images, measure average compressed size, and report an estimated total. Nothing is written to the destination. |
 | `-SampleSize` | `60` | Number of images to sample for `-EstimateOnly`. |
@@ -86,8 +87,8 @@ A source photo is (re)processed when any of these is true:
 
 - it is new, or its destination file is missing;
 - the source's last-modified time changed (e.g. you edited GPS/EXIF);
-- `-MaxPixels`, `-Quality`, or `-OutputFormat` differ from when it was last made
-  (a format change also cleans up the stale old-extension file);
+- `-MaxPixels`, `-Quality`, `-OutputFormat`, or `-AvifSpeed` differ from when it was
+  last made (a format change also cleans up the stale old-extension file);
 - `-FullRefresh` is used.
 
 ### Examples
@@ -98,6 +99,9 @@ A source photo is (re)processed when any of these is true:
 
 # Convert everything to AVIF (smallest; Android/Pixel displays it natively):
 .\Compress-PhotoLibrary.ps1 -SourceFolder "D:\Photos" -DestinationFolder "E:\PhoneCopy" -MaxPixels 2048 -Quality 60 -OutputFormat avif
+
+# Smaller AVIF for a small favourites folder, trading speed for size:
+.\Compress-PhotoLibrary.ps1 -SourceFolder "D:\Photos\Favourites" -DestinationFolder "E:\PhoneCopy\Favourites" -OutputFormat avif -Quality 60 -AvifSpeed 4
 
 # Exact mirror (also removes copies whose originals were deleted):
 .\Compress-PhotoLibrary.ps1 -SourceFolder "D:\Photos" -DestinationFolder "E:\PhoneCopy" -OutputFormat avif -Mirror
@@ -157,6 +161,26 @@ The installed/portable ImageMagick reads `.heic` fine, but its format support is
 and HEIC, is royalty-free, and displays natively on modern Android (Pixel 7a included).
 `.heic` output is only possible with a custom ImageMagick/libheif build that bundles an
 HEVC (x265) encoder.
+
+### Tuning AVIF speed
+
+AVIF encoding is CPU-only (no GPU acceleration exists for it in ImageMagick, and
+hardware AV1 encoders only appear on NVIDIA RTX 40-series / recent AMD/Intel GPUs —
+not older cards). The one real lever is encoder **effort** via `-AvifSpeed`.
+
+Measured on a 4000×3000 → 2048 photo at quality 60 (times are per image, single encode):
+
+| `-AvifSpeed` | Time/image | Relative size |
+|:---:|---:|---|
+| *default (`-1`)* | ~1.6 s | baseline (fastest) |
+| `5` | ~8 s | somewhat smaller |
+| `3` | ~21 s | ~15–40% smaller |
+| `2` | ~37 s | smallest |
+
+The default is already the fast path. Going slower buys smaller files but costs
+**5–20×** the CPU time — viable for a small favourites folder, but **not** for a whole
+100k-photo library (that turns a few-hour run into days). Recommendation: leave
+`-AvifSpeed` at default for the bulk library; use a lower value only on small subsets.
 
 ### Rough sizing guide
 

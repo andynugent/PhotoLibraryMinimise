@@ -111,3 +111,21 @@ automatically update both in future with any changes.
 - Created this **`history.md`**.
 - Standing agreement: keep `README.md` and `history.md` updated as part of any future
   change to this project.
+
+## 7. GPU acceleration question + `-AvifSpeed` knob
+
+**Prompt:** The laptop with the photos is 6 core / 12 thread with an NVIDIA GTX 1050.
+Is there an ImageMagick build that does the AVIF compression on the GPU to speed it up?
+*(then)* Yes, add the `-AvifSpeed` knob.
+
+**Changes:**
+- Explained (with a benchmark) that GPU AVIF acceleration is not available: the GTX
+  1050 (Pascal) has no hardware AV1 encoder — those only exist on RTX 40-series and
+  newer — and ImageMagick's AVIF path (libheif + libaom) is CPU-only regardless. The
+  real speed/size lever is the encoder effort setting.
+- Added **`-AvifSpeed`** (`-1`=encoder default/fast … `0`=slowest/smallest,
+  `9`=fastest) to `Compress-PhotoLibrary.ps1`, passed as `-define heic:speed=N` for
+  AVIF/HEIC output only. Tracked in the manifest so changing it reprocesses; shown in
+  the `-EstimateOnly` header. Documented the speed-vs-size trade-off in the README.
+- Verified: default ~1s/image, `-AvifSpeed 3` ~25s/image (smaller), a speed change
+  triggers reprocessing, and an unchanged re-run skips.

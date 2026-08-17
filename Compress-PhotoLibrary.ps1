@@ -54,6 +54,13 @@
       webp/png/jxl/tiff - also supported if the build can write them.
     The script verifies the target format is writable before starting.
 
+.PARAMETER AvifSpeed
+    Encoder effort for AVIF/HEIC output, passed as '-define heic:speed=N'.
+    0 = slowest/smallest, 9 = fastest/largest. Default -1 leaves the encoder's
+    own (fast) default in place. Lower values yield noticeably smaller files but
+    cost many times more CPU per image - fine for a small favourites folder, but
+    impractical for a whole 100k library. Ignored for non-AVIF/HEIC formats.
+
 .PARAMETER FullRefresh
     Ignore the manifest and reprocess every image, overwriting the destination.
 
@@ -117,6 +124,7 @@ param(
     [ValidateRange(1, 100)]     [int] $Quality   = 85,
     [ValidateSet('same','jpg','jpeg','avif','heic','heif','webp','png','jxl','tiff')]
     [string] $OutputFormat = 'same',
+    [ValidateRange(-1, 9)] [int] $AvifSpeed = -1,
     [switch] $FullRefresh,
     [switch] $EstimateOnly,
     [ValidateRange(1, 100000)]  [int] $SampleSize = 60,
@@ -237,7 +245,8 @@ function Convert-OneImage {
         [int]    $MaxPixels,
         [int]    $Quality,
         [string] $MagickExe,
-        [string] $OutExt     # target extension, e.g. 'jpg' or 'avif' (defaults to $Dest's)
+        [string] $OutExt,      # target extension, e.g. 'jpg' or 'avif' (defaults to $Dest's)
+        [int]    $AvifSpeed = -1
     )
     if (-not $OutExt) { $OutExt = [System.IO.Path]::GetExtension($Dest).TrimStart('.') }
 
@@ -283,7 +292,13 @@ function Convert-OneImage {
         $tmp = "$Dest.tmp$([System.IO.Path]::GetRandomFileName()).part"
         $coder = $OutExt.ToUpperInvariant()
         $geom = "${MaxPixels}x${MaxPixels}>"
-        $stderr = & $MagickExe "$Source" -quiet -resize $geom -quality $Quality "${coder}:$tmp" 2>&1
+        $mArgs = @("$Source", '-quiet', '-resize', $geom, '-quality', $Quality)
+        if ($AvifSpeed -ge 0 -and $OutExt -in @('avif','heic','heif')) {
+            # libheif exposes the AV1/HEVC encoder effort under the 'heic:' namespace.
+            $mArgs += @('-define', "heic:speed=$AvifSpeed")
+        }
+        $mArgs += "${coder}:$tmp"
+        $stderr = & $MagickExe @mArgs 2>&1
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tmp)) {
             if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
             throw "magick failed (exit $LASTEXITCODE): $stderr"
@@ -384,10 +399,12 @@ foreach ($path in $enum) {
         $entry = $null
         if ($manifest.TryGetValue($rel, [ref]$entry)) {
             $entryOut = if ($entry.PSObject.Properties['oe']) { [string]$entry.oe } else { $ext.ToLowerInvariant() }
+            $entrySp  = if ($entry.PSObject.Properties['sp']) { [int]$entry.sp } else { -1 }
             if ([long]$entry.w -eq $srcWriteTicks -and
                 [int]$entry.q  -eq $Quality -and
                 [int]$entry.mp -eq $MaxPixels -and
                 $entryOut -eq $outExt -and
+                $entrySp -eq $AvifSpeed -and
                 (Test-Path -LiteralPath $dest)) {
                 $need = $false
             }
@@ -429,7 +446,8 @@ if ($EstimateOnly) {
 
     $n = [Math]::Min($SampleSize, $totalSource)
     $fmtLabel = if ($OutputFormat -eq 'same') { 'same-as-source' } else { ".$OutputFormat" }
-    Write-Host "`nEstimating from a random sample of $n image(s) at MaxPixels=$MaxPixels, Quality=$Quality, Format=$fmtLabel..." -ForegroundColor Yellow
+    $spLabel  = if ($AvifSpeed -ge 0) { ", AvifSpeed=$AvifSpeed" } else { '' }
+    Write-Host "`nEstimating from a random sample of $n image(s) at MaxPixels=$MaxPixels, Quality=$Quality, Format=$fmtLabel$spLabel..." -ForegroundColor Yellow
 
     # Build the full relative-path list once, then pick a random sample.
     $sampleRel = $allSourceRel | Get-Random -Count $n
@@ -445,7 +463,7 @@ if ($EstimateOnly) {
             $src = Join-Path $SourceFolder $rel
             $outExt = if ($OutputFormat -eq 'same') { [System.IO.Path]::GetExtension($rel).TrimStart('.') } else { $OutputFormat }
             $dst = Join-Path $tmpRoot ("s$i.$outExt")
-            $r = Convert-OneImage -Source $src -Dest $dst -OutExt $outExt -MaxPixels $MaxPixels -Quality $Quality -MagickExe $MagickPath
+            $r = Convert-OneImage -Source $src -Dest $dst -OutExt $outExt -MaxPixels $MaxPixels -Quality $Quality -MagickExe $MagickPath -AvifSpeed $AvifSpeed
             if ($r.Success) {
                 $ok++
                 $sumSrc += (Get-Item -LiteralPath $src).Length
@@ -528,7 +546,7 @@ try {
             ${function:Convert-OneImage} = $using:funcDef
             $item = $_
             $r = Convert-OneImage -Source $item.Source -Dest $item.Dest -OutExt $item.OutExt `
-                    -MaxPixels $using:MaxPixels -Quality $using:Quality -MagickExe $using:MagickPath
+                    -MaxPixels $using:MaxPixels -Quality $using:Quality -MagickExe $using:MagickPath -AvifSpeed $using:AvifSpeed
             [pscustomobject]@{
                 Rel     = $item.Rel
                 WTicks  = $item.WTicks
@@ -546,7 +564,7 @@ try {
                 $processed++
                 $entry = [pscustomobject]@{
                     rel = $r.Rel; w = $r.WTicks; sl = $r.SLen
-                    dl = $r.DLen; t = $r.Taken; q = $Quality; mp = $MaxPixels; oe = $r.OutExt
+                    dl = $r.DLen; t = $r.Taken; q = $Quality; mp = $MaxPixels; oe = $r.OutExt; sp = $AvifSpeed
                 }
                 $manifest[$r.Rel] = $entry
                 $manifestWriter.WriteLine(($entry | ConvertTo-Json -Compress -Depth 4))
