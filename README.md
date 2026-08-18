@@ -77,6 +77,7 @@ automatically (~31 MB) before starting. Subsequent runs reuse it.
 | `-MagickPath` | auto | Explicit path to `magick.exe`. If omitted, uses the portable copy / auto-download / PATH. |
 | `-NoDownload` | off | Do not auto-download a portable ImageMagick; use `magick` on PATH instead. |
 | `-StateFile` | `<source>\.photolib-manifest.jsonl` | Path to the resume manifest. Kept in the source root by default so it travels with the library and survives destination rebuilds. |
+| `-TimeToleranceSeconds` | `2` | Tolerance when comparing source/output modified times for resume. Absorbs filesystem timestamp rounding (FAT 2s, exFAT 10ms) and MTP/network write-vs-read drift so unchanged files aren't reprocessed. `0` = exact. Like rsync's `--modify-window`. |
 | `-Verbose` | off | Log every image as it starts and finishes: worker thread id, elapsed time, source→output dimensions, quality (and AVIF speed), and size/ratio. |
 
 \* `heic` output requires an ImageMagick build with an HEVC **encoder**, which the
@@ -101,6 +102,20 @@ Otherwise the file is skipped immediately, so an interrupted run resumes cheaply
 The manifest lives with the source library, so it survives destination rebuilds; a
 manifest left in the destination root by an older version is migrated automatically
 on first run.
+
+Modified-time comparisons use a tolerance (`-TimeToleranceSeconds`, default 2s).
+Different filesystems store timestamps at different resolutions — NTFS 100 ns,
+exFAT 10 ms, FAT 2 s — and phone (MTP) or network targets can read back a value a
+second or two off from what was written. With an exact comparison that makes every
+file look "changed" and reprocess on every run; the tolerance absorbs that while
+still catching real edits (which move the time by far more than a couple of seconds).
+
+**If a re-run keeps reprocessing files it already did**, the scan prints a line like
+`N previously-processed file(s) are being redone: source-mtime=…, output-mtime=…,
+output-missing=…, settings=…`, and `-Verbose` adds a per-file `REDO … Δ1.9s` reason.
+If the deltas are only a second or two, raise `-TimeToleranceSeconds`; if they're
+whole hours, that's a FAT/exFAT daylight-saving offset — keep the output on NTFS, or
+set the tolerance above 3600.
 
 ### Progress reporting
 

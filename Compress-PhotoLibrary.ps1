@@ -102,6 +102,15 @@
     Do not auto-download a portable ImageMagick when none is found; use magick on
     PATH instead (or fail with guidance if PATH has none).
 
+.PARAMETER TimeToleranceSeconds
+    Tolerance (seconds) when comparing the source and output modified times for
+    resume. Default 2. Filesystems store timestamps at different resolutions
+    (NTFS 100ns, exFAT 10ms, FAT 2s) and some network/phone (MTP) targets read a
+    slightly different value than was written, which with an exact comparison
+    would reprocess every file on every run. The default 2s absorbs that while
+    still catching real edits (which move the time by far more). Set 0 for exact
+    matching. Mirrors rsync's --modify-window.
+
 .PARAMETER StateFile
     Path to the resume manifest (JSON-lines). Default:
     <SourceFolder>\.photolib-manifest.jsonl. Records, per source file, its
@@ -148,7 +157,8 @@ param(
     [ValidateRange(1, 100000)] [int] $ChunkSize = 500,
     [string] $MagickPath,
     [switch] $NoDownload,
-    [string] $StateFile
+    [string] $StateFile,
+    [ValidateRange(0, 3600)] [double] $TimeToleranceSeconds = 2
 )
 
 $ErrorActionPreference = 'Stop'
@@ -205,6 +215,12 @@ $DestinationFolder = (Resolve-Path -LiteralPath $DestinationFolder).Path
 
 # Verbose (-Verbose) turns on per-image start/end logging in the workers.
 $logDetail = ($VerbosePreference -ne 'SilentlyContinue')
+
+# Timestamps are compared with a tolerance so that filesystem rounding (FAT/exFAT
+# use 2s/10ms; some network/MTP targets differ between write-back and cold read)
+# does not force pointless reprocessing. rsync solves the same problem with
+# --modify-window. 0 = exact match.
+$tolTicks = [long]([Math]::Round($TimeToleranceSeconds * 10000000))
 
 # State/manifest lives in the SOURCE root by default so it travels with the
 # library and survives destination rebuilds. -StateFile overrides the location.
@@ -445,6 +461,9 @@ $skip = 0
 $totalSource = 0
 $unsupported = 0
 $nonImage = 0
+# Why files with a prior record are being reprocessed (diagnostic for resume).
+$reprocessSeen = 0
+$rReason = [ordered]@{ 'source-mtime' = 0; 'output-mtime' = 0; 'output-missing' = 0; 'settings' = 0 }
 
 # Every file seen lands in exactly one of these buckets, so the scan line always
 # reconciles: seen = to process + up to date + non-image + unwritable.
@@ -504,16 +523,34 @@ foreach ($path in $enum) {
             $entryOut = if ($entry.PSObject.Properties['oe']) { [string]$entry.oe } else { $ext.ToLowerInvariant() }
             $entrySp  = if ($entry.PSObject.Properties['sp']) { [int]$entry.sp } else { -1 }
             $entryDm  = if ($entry.PSObject.Properties['dm']) { [long]$entry.dm } else { $null }
-            # The output must still exist and (if we recorded its mtime) be unchanged.
             $destFi   = [System.IO.FileInfo]::new($dest)
-            $destOk   = $destFi.Exists -and ($null -eq $entryDm -or $destFi.LastWriteTimeUtc.Ticks -eq $entryDm)
-            if ([long]$entry.w -eq $srcWriteTicks -and
-                [int]$entry.q  -eq $Quality -and
-                [int]$entry.mp -eq $MaxPixels -and
-                $entryOut -eq $outExt -and
-                $entrySp -eq $AvifSpeed -and
-                $destOk) {
+
+            # Compare mtimes within a tolerance so filesystem rounding doesn't
+            # force needless reprocessing (see $tolTicks above).
+            $srcDiff  = [Math]::Abs([long]$entry.w - $srcWriteTicks)
+            $srcSame  = $srcDiff -le $tolTicks
+            $setSame  = ([int]$entry.q -eq $Quality) -and ([int]$entry.mp -eq $MaxPixels) -and
+                        ($entryOut -eq $outExt) -and ($entrySp -eq $AvifSpeed)
+            $destDiff = if ($destFi.Exists -and $null -ne $entryDm) { [Math]::Abs($destFi.LastWriteTimeUtc.Ticks - $entryDm) } else { 0 }
+            $destSame = $destFi.Exists -and ($null -eq $entryDm -or $destDiff -le $tolTicks)
+
+            if ($srcSame -and $setSame -and $destSame) {
                 $need = $false
+            } else {
+                # Record why this previously-processed file is being redone.
+                $reprocessSeen++
+                if (-not $srcSame)        { $rReason['source-mtime']++ }
+                if (-not $setSame)        { $rReason['settings']++ }
+                if (-not $destFi.Exists)  { $rReason['output-missing']++ }
+                elseif (-not $destSame)   { $rReason['output-mtime']++ }
+                if ($logDetail) {
+                    $why = @()
+                    if (-not $srcSame)       { $why += ('source-mtime Δ{0:N1}s' -f ($srcDiff / 1e7)) }
+                    if (-not $setSame)       { $why += 'settings' }
+                    if (-not $destFi.Exists) { $why += 'output-missing' }
+                    elseif (-not $destSame)  { $why += ('output-mtime Δ{0:N1}s' -f ($destDiff / 1e7)) }
+                    Write-Host ("  REDO {0}: {1}" -f $rel, ($why -join ', ')) -ForegroundColor DarkYellow
+                }
             }
             # If the output format changed, remove the stale old-extension file.
             if ($entryOut -ne $outExt) {
@@ -546,6 +583,13 @@ Write-Host ("Found {0:N0} source images: {1:N0} to process, {2:N0} up to date." 
     $totalSource, $work.Count, $skip) -ForegroundColor Cyan
 if ($nonImage -gt 0) {
     Write-Host ("  ({0:N0} non-image file(s) ignored.)" -f $nonImage) -ForegroundColor DarkGray
+}
+if ($reprocessSeen -gt 0) {
+    Write-Host ("  {0:N0} previously-processed file(s) are being redone: source-mtime={1:N0}, output-mtime={2:N0}, output-missing={3:N0}, settings={4:N0}." -f `
+        $reprocessSeen, $rReason['source-mtime'], $rReason['output-mtime'], $rReason['output-missing'], $rReason['settings']) -ForegroundColor DarkYellow
+    if (($rReason['source-mtime'] + $rReason['output-mtime']) -gt 0) {
+        Write-Host ("  (Timestamp mismatches - current tolerance is {0}s. Raise -TimeToleranceSeconds if the deltas are small filesystem rounding; run -Verbose to see per-file deltas.)" -f $TimeToleranceSeconds) -ForegroundColor DarkYellow
+    }
 }
 if ($unsupported -gt 0) {
     Write-Warning ("{0:N0} file(s) skipped because this build cannot write their format. Use -OutputFormat avif to include them." -f $unsupported)

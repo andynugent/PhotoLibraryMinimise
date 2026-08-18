@@ -240,3 +240,27 @@ still exist in the output, but also handle the source image being updated.
 - Verified: verbose start/finish lines, state file written to the source root with the
   new fields, clean resume-skip on an unchanged re-run, reprocessing when an output
   file's mtime is tampered, and migration of a legacy destination manifest.
+
+## 13. Resume reprocessing the same folders — timestamp tolerance + diagnostics
+
+**Prompt:** Double-check the restart is working — it takes a long time to reprocess
+the same folders each run. Do we need a delta on the time comparison so it ignores
+changes of a couple of seconds?
+
+**Changes:**
+- Root cause: resume compared source/output modified times by **exact 100ns ticks**.
+  That is fine on NTFS, but a destination on exFAT/FAT (SD card / phone) or reached
+  over MTP/network reads back a slightly different mtime than was written, so every
+  file looked "changed" and was reprocessed each run. Confirmed the JSON tick
+  round-trip itself is lossless (Int64), ruling that out.
+- Added **`-TimeToleranceSeconds`** (default 2) and switched the source- and
+  output-mtime checks to compare within that window (rsync's `--modify-window`
+  idea). `0` restores exact matching.
+- Added resume diagnostics: the scan now reports how many previously-processed files
+  are being redone and why (`source-mtime` / `output-mtime` / `output-missing` /
+  `settings`), and `-Verbose` prints a per-file `REDO <file>: output-mtime Δ6.0s`
+  line so the drifting timestamp and its size are visible.
+- README updated (parameter table, change-detection section, a troubleshooting note
+  for "keeps reprocessing"); help text documents the new parameter.
+- Verified: a +1s output nudge now skips, +6s reprocesses with the reason shown,
+  a clean re-run skips, and `-TimeToleranceSeconds 0` reprocesses on a 1s nudge.
