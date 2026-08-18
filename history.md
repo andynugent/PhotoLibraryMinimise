@@ -129,3 +129,33 @@ Is there an ImageMagick build that does the AVIF compression on the GPU to speed
   the `-EstimateOnly` header. Documented the speed-vs-size trade-off in the README.
 - Verified: default ~1s/image, `-AvifSpeed 3` ~25s/image (smaller), a speed change
   triggers reprocessing, and an unchanged re-run skips.
+
+## 8. Bug fix — trailing separator on `-SourceFolder` truncated sub-folder names
+
+**Prompt:** There's a bug that the output folder is missing the first character of
+the sub-folder: processing `f:\photos` → `f:\photos.phone` gave
+`f:\photos\Amazon` → `f:\photos.phone\Mazon`.
+
+**Changes:**
+- Fixed the relative-path calculation in `Compress-PhotoLibrary.ps1`. It used
+  `$SourceFolder.Length + 1` as the prefix length to strip, which assumed the
+  resolved source path never ends in a separator. `Resolve-Path` keeps a trailing
+  `\` if the caller typed one (`f:\photos\`), and a drive root (`F:\`) always has
+  one, so the `+ 1` consumed the first character of every relative path — hence
+  `Amazon` → `Mazon`. The prefix length is now derived from a normalised copy of
+  the source path that has exactly one trailing separator, so `F:\photos`,
+  `F:\photos\` and `F:\` all yield `Amazon\pic.jpg`.
+- Note for existing runs: the affected manifest entries and destination files carry
+  the truncated names. Re-running with `-Mirror` deletes them as orphans and writes
+  the correct paths; without `-Mirror`, remove the mis-named destination folders by
+  hand (or use `-FullRefresh`).
+
+## 9. Standing rule — suggest a commit message
+
+**Prompt:** Add a standing rule to output a suggested commit comment of the changes
+that have been made — ideally a short title and a 1-3 line summary/description.
+
+**Changes:**
+- No script changes. Recorded the standing agreement: every set of changes now ends
+  with a suggested commit message (short imperative title + 1-3 line description) in
+  a copyable code block. It is a suggestion only — nothing is committed unless asked.

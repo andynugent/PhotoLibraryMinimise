@@ -61,7 +61,7 @@ automatically (~31 MB) before starting. Subsequent runs reuse it.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `-SourceFolder` | *(required)* | Root of the original library. Never modified. |
+| `-SourceFolder` | *(required)* | Root of the original library. Never modified. A trailing `\` is fine, as is a drive root such as `F:\`. |
 | `-DestinationFolder` | *(required)* | Root for the reduced copies. Created if missing. |
 | `-MaxPixels` | `2048` | Longest-edge limit in pixels. Larger images shrink to fit; smaller are left untouched; aspect ratio preserved. |
 | `-Quality` | `85` | Encoder quality 1–100. Scales differ per codec — AVIF ~55–63 ≈ JPEG ~85 visually, at a fraction of the size. |

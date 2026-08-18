@@ -363,7 +363,15 @@ if ((Test-Path -LiteralPath $ManifestPath) -and -not $FullRefresh) {
 # Enumerate source images and classify each as process / skip.
 # ---------------------------------------------------------------------------
 Write-Host "Scanning source: $SourceFolder" -ForegroundColor Cyan
-$srcPrefixLen = $SourceFolder.Length + 1
+# Resolve-Path keeps any trailing separator the caller typed ('f:\photos\') and
+# always has one for a drive root ('F:\'), so derive the prefix length from a
+# normalised copy rather than assuming a separator has to be added.
+$srcPrefix = $SourceFolder
+if ($srcPrefix[-1] -ne [System.IO.Path]::DirectorySeparatorChar -and
+    $srcPrefix[-1] -ne [System.IO.Path]::AltDirectorySeparatorChar) {
+    $srcPrefix += [System.IO.Path]::DirectorySeparatorChar
+}
+$srcPrefixLen = $srcPrefix.Length
 $allSourceRel = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $work = [System.Collections.Generic.List[object]]::new()
 $skip = 0
