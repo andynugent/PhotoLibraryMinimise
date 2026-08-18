@@ -10,13 +10,19 @@
     downscaled versions in a destination tree (same sub-folders + filenames),
     and can be re-run repeatedly to pick up only new or changed photos.
 
-    Change detection uses a manifest (JSON-lines) stored in the destination
-    root. Each entry records the source file's LastWriteTimeUtc, size, and the
-    settings used. A file is (re)processed when:
+    Change detection uses a manifest (JSON-lines) stored in the SOURCE root by
+    default (.photolib-manifest.jsonl; override with -StateFile). Each entry
+    records the source file's LastWriteTimeUtc and size, the output path and the
+    output file's mtime, and the settings used. A file is (re)processed when:
       * it is new, or
-      * the destination file is missing, or
+      * the output file is missing or its recorded mtime no longer matches
+        (e.g. a partial/interrupted write), or
       * the source LastWriteTimeUtc changed (e.g. you edited GPS/EXIF), or
-      * the MaxPixels or Quality settings differ from when it was last made.
+      * the MaxPixels/Quality/OutputFormat/AvifSpeed settings differ from when
+        it was last made.
+    Otherwise the file is skipped immediately, so an interrupted run resumes
+    cheaply. Run with -Verbose to log every image as it starts/finishes
+    (worker thread id, elapsed time, dimensions, quality, and size/ratio).
 
     Images larger than -MaxPixels (longest edge) are downscaled preserving
     aspect ratio; smaller images are never upscaled. JPEG quality is set with
@@ -96,6 +102,14 @@
     Do not auto-download a portable ImageMagick when none is found; use magick on
     PATH instead (or fail with guidance if PATH has none).
 
+.PARAMETER StateFile
+    Path to the resume manifest (JSON-lines). Default:
+    <SourceFolder>\.photolib-manifest.jsonl. Records, per source file, its
+    modified time plus the output path and output mtime, so re-runs skip
+    already-processed files whose output still exists and reprocess anything
+    whose source or output changed. On first use it migrates an older manifest
+    from the destination root if one is found.
+
 .EXAMPLE
     # First, estimate how big the phone copy will be at these settings:
     .\Compress-PhotoLibrary.ps1 -SourceFolder D:\Photos -DestinationFolder E:\PhoneCopy `
@@ -133,7 +147,8 @@ param(
     [int] $ThrottleLimit = [Environment]::ProcessorCount,
     [ValidateRange(1, 100000)] [int] $ChunkSize = 500,
     [string] $MagickPath,
-    [switch] $NoDownload
+    [switch] $NoDownload,
+    [string] $StateFile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -188,7 +203,23 @@ if (-not (Test-Path -LiteralPath $DestinationFolder)) {
 }
 $DestinationFolder = (Resolve-Path -LiteralPath $DestinationFolder).Path
 
-$ManifestPath = Join-Path $DestinationFolder '.photolib-manifest.jsonl'
+# Verbose (-Verbose) turns on per-image start/end logging in the workers.
+$logDetail = ($VerbosePreference -ne 'SilentlyContinue')
+
+# State/manifest lives in the SOURCE root by default so it travels with the
+# library and survives destination rebuilds. -StateFile overrides the location.
+if (-not $StateFile) { $StateFile = Join-Path $SourceFolder '.photolib-manifest.jsonl' }
+$ManifestPath = $StateFile
+
+# One-time migration: if there's no state file yet but an older run left one in
+# the destination root, copy it across so we don't reprocess everything.
+$legacyManifest = Join-Path $DestinationFolder '.photolib-manifest.jsonl'
+if (-not $FullRefresh -and -not (Test-Path -LiteralPath $ManifestPath) -and
+    (Test-Path -LiteralPath $legacyManifest) -and
+    ((Resolve-Path -LiteralPath $legacyManifest).Path -ne $ManifestPath)) {
+    Write-Host "Migrating existing manifest from destination to source root..." -ForegroundColor DarkGray
+    Copy-Item -LiteralPath $legacyManifest -Destination $ManifestPath -Force
+}
 
 # Lowercased extension set for fast membership tests.
 $extSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -246,25 +277,36 @@ function Convert-OneImage {
         [int]    $Quality,
         [string] $MagickExe,
         [string] $OutExt,      # target extension, e.g. 'jpg' or 'avif' (defaults to $Dest's)
-        [int]    $AvifSpeed = -1
+        [int]    $AvifSpeed = -1,
+        [bool]   $LogDetail = $false,
+        [string] $Rel = ''
     )
     if (-not $OutExt) { $OutExt = [System.IO.Path]::GetExtension($Dest).TrimStart('.') }
 
     $result = [ordered]@{
-        Success   = $false
+        Success    = $false
         DestLength = 0L
-        TakenIso  = $null
-        Error     = $null
+        DestMTicks = 0L        # output file LastWriteTimeUtc ticks (for resume verification)
+        TakenIso   = $null
+        Error      = $null
     }
 
+    $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+    $swx = [System.Diagnostics.Stopwatch]::StartNew()
+    $label = if ($Rel) { $Rel } else { [System.IO.Path]::GetFileName($Source) }
+    if ($LogDetail) { Write-Host ("  [t{0,2}] START {1}" -f $tid, $label) -ForegroundColor DarkGray }
+
     try {
-        # 1. Read the "date taken" from EXIF (source). Try Original, then
-        #    Digitized, then the generic DateTime tag. Empty if none present.
-        $fmt = '%[EXIF:DateTimeOriginal]|%[EXIF:DateTimeDigitized]|%[EXIF:DateTime]'
+        # 1. Read source dimensions + the "date taken" from EXIF in one call.
+        #    Taken date: try Original, then Digitized, then the generic DateTime.
+        $fmt = '%w|%h|%[EXIF:DateTimeOriginal]|%[EXIF:DateTimeDigitized]|%[EXIF:DateTime]'
         $raw = & $MagickExe identify -quiet -format $fmt -- "$Source" 2>$null
+        $srcW = 0; $srcH = 0
         $taken = $null
         if ($raw) {
-            foreach ($cand in ($raw -split '\|')) {
+            $parts = $raw -split '\|'
+            if ($parts.Count -ge 2) { [void][int]::TryParse($parts[0], [ref]$srcW); [void][int]::TryParse($parts[1], [ref]$srcH) }
+            foreach ($cand in ($parts | Select-Object -Skip 2)) {
                 $c = $cand.Trim()
                 if ($c -and $c -ne '0000:00:00 00:00:00') {
                     $dt = [datetime]::MinValue
@@ -314,12 +356,37 @@ function Convert-OneImage {
         [System.IO.File]::SetCreationTime($Dest, $taken)
         [System.IO.File]::SetLastWriteTime($Dest, $taken)
 
-        $result.Success   = $true
-        $result.DestLength = (Get-Item -LiteralPath $Dest).Length
+        $destInfo = [System.IO.FileInfo]::new($Dest)
+        $result.Success    = $true
+        $result.DestLength = $destInfo.Length
+        $result.DestMTicks = $destInfo.LastWriteTimeUtc.Ticks
         $result.TakenIso   = $taken.ToString('o')
+
+        if ($LogDetail) {
+            $swx.Stop()
+            # Output dimensions after shrink-only resize (computed from source).
+            $outW = $srcW; $outH = $srcH
+            $longEdge = [Math]::Max($srcW, $srcH)
+            if ($longEdge -gt $MaxPixels -and $longEdge -gt 0) {
+                $scale = $MaxPixels / [double]$longEdge
+                $outW = [int][Math]::Round($srcW * $scale); $outH = [int][Math]::Round($srcH * $scale)
+            }
+            $srcLen = (Get-Item -LiteralPath $Source).Length
+            $ratio  = if ($srcLen -gt 0) { '{0:P0}' -f ($destInfo.Length / $srcLen) } else { 'n/a' }
+            $spTxt  = if ($AvifSpeed -ge 0 -and $OutExt -in @('avif','heic','heif')) { " s$AvifSpeed" } else { '' }
+            # Self-contained size formatter (Format-Size is not in the parallel runspace).
+            $fmtSz = { param($b) if ($b -ge 1MB) { '{0:N2} MB' -f ($b/1MB) } elseif ($b -ge 1KB) { '{0:N1} KB' -f ($b/1KB) } else { "$([long]$b) B" } }
+            Write-Host ("  [t{0,2}] DONE  {1}  {2}x{3} -> {4}x{5}  q{6}{7}  {8} -> {9} ({10})  {11:N2}s" -f `
+                $tid, $label, $srcW, $srcH, $outW, $outH, $Quality, $spTxt,
+                (& $fmtSz $srcLen), (& $fmtSz $destInfo.Length), $ratio, $swx.Elapsed.TotalSeconds) -ForegroundColor Gray
+        }
     }
     catch {
         $result.Error = $_.Exception.Message
+        if ($LogDetail) {
+            $swx.Stop()
+            Write-Host ("  [t{0,2}] FAIL  {1}  ({2:N2}s)  {3}" -f $tid, $label, $swx.Elapsed.TotalSeconds, $_.Exception.Message) -ForegroundColor Red
+        }
     }
 
     return [pscustomobject]$result
@@ -436,12 +503,16 @@ foreach ($path in $enum) {
         if ($manifest.TryGetValue($rel, [ref]$entry)) {
             $entryOut = if ($entry.PSObject.Properties['oe']) { [string]$entry.oe } else { $ext.ToLowerInvariant() }
             $entrySp  = if ($entry.PSObject.Properties['sp']) { [int]$entry.sp } else { -1 }
+            $entryDm  = if ($entry.PSObject.Properties['dm']) { [long]$entry.dm } else { $null }
+            # The output must still exist and (if we recorded its mtime) be unchanged.
+            $destFi   = [System.IO.FileInfo]::new($dest)
+            $destOk   = $destFi.Exists -and ($null -eq $entryDm -or $destFi.LastWriteTimeUtc.Ticks -eq $entryDm)
             if ([long]$entry.w -eq $srcWriteTicks -and
                 [int]$entry.q  -eq $Quality -and
                 [int]$entry.mp -eq $MaxPixels -and
                 $entryOut -eq $outExt -and
                 $entrySp -eq $AvifSpeed -and
-                (Test-Path -LiteralPath $dest)) {
+                $destOk) {
                 $need = $false
             }
             # If the output format changed, remove the stale old-extension file.
@@ -621,14 +692,17 @@ try {
                 ${function:Convert-OneImage} = $using:funcDef
                 $item = $_
                 $r = Convert-OneImage -Source $item.Source -Dest $item.Dest -OutExt $item.OutExt `
-                        -MaxPixels $using:MaxPixels -Quality $using:Quality -MagickExe $using:MagickPath -AvifSpeed $using:AvifSpeed
+                        -MaxPixels $using:MaxPixels -Quality $using:Quality -MagickExe $using:MagickPath -AvifSpeed $using:AvifSpeed `
+                        -LogDetail $using:logDetail -Rel $item.Rel
                 [pscustomobject]@{
                     Rel     = $item.Rel
+                    Dest    = $item.Dest
                     WTicks  = $item.WTicks
                     SLen    = $item.SLen
                     OutExt  = $item.OutExt
                     Success = $r.Success
                     DLen    = $r.DestLength
+                    DMTicks = $r.DestMTicks
                     Taken   = $r.TakenIso
                     Error   = $r.Error
                 }
@@ -639,9 +713,13 @@ try {
                     $processed++; $fOk++
                     $fSrcBytes += [double]$r.SLen
                     $fDstBytes += [double]$r.DLen
+                    $opRel = if ($r.Dest.StartsWith($DestinationFolder, [StringComparison]::OrdinalIgnoreCase)) {
+                        $r.Dest.Substring($DestinationFolder.Length).TrimStart('\','/')
+                    } else { $r.Dest }
                     $entry = [pscustomobject]@{
                         rel = $r.Rel; w = $r.WTicks; sl = $r.SLen
                         dl = $r.DLen; t = $r.Taken; q = $Quality; mp = $MaxPixels; oe = $r.OutExt; sp = $AvifSpeed
+                        op = $opRel; dm = $r.DMTicks
                     }
                     $manifest[$r.Rel] = $entry
                     $manifestWriter.WriteLine(($entry | ConvertTo-Json -Compress -Depth 4))

@@ -214,3 +214,29 @@ process" is lower as expected when some are already done).
   console fallback and the end-of-scan summary; the progress bar now updates every
   200 files instead of every 500.
 - README: documented the scan line, what `other` means, and why "up to date" plateaus.
+
+## 12. Verbose logging + robust resume (state in source root)
+
+**Prompt:** Add a `--verbose` mode to list all images as they start/finish, with
+relevant info (thread id, elapsed time, compression level). Also, we don't seem to
+be resuming nicely — record the path and output file's modified time (e.g. in a JSON
+file in the input folder root) so we can immediately skip processed files if they
+still exist in the output, but also handle the source image being updated.
+
+**Changes:**
+- **`-Verbose`** now logs each image as it starts and finishes from the worker,
+  including the parallel thread id (`[t18]`), elapsed time, source→output dimensions,
+  quality (and AVIF speed), and source→output size with ratio.
+- Moved the resume manifest to the **source root** by default
+  (`<source>\.photolib-manifest.jsonl`), overridable with **`-StateFile`**. It now
+  travels with the library and survives destination rebuilds; an older manifest found
+  in the destination root is migrated automatically on first run.
+- Each entry additionally records the **output path (`op`) and output mtime (`dm`)**.
+  A file is skipped only if its output still exists **and** its recorded mtime matches;
+  a missing/partial/edited output is reprocessed, alongside the existing source-mtime
+  and settings checks.
+- README updated (change-detection section, parameter table, verbose example, file
+  list, resumable note).
+- Verified: verbose start/finish lines, state file written to the source root with the
+  new fields, clean resume-skip on an unchanged re-run, reprocessing when an output
+  file's mtime is tampered, and migration of a legacy destination manifest.

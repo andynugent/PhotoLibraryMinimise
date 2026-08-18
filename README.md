@@ -22,7 +22,7 @@ destination size** before you commit to a full run.
 | `Compress-PhotoLibrary.ps1` | Main script: scans the source, makes reduced copies, tracks state. |
 | `Get-PortableImageMagick.ps1` | Downloads a portable ImageMagick (no system install) into `tools\`. |
 | `tools\ImageMagick\` | The portable ImageMagick (auto-created; git-ignored). |
-| `<destination>\.photolib-manifest.jsonl` | State file that records what has been processed. |
+| `<source>\.photolib-manifest.jsonl` | Resume state: what has been processed (source root by default; see `-StateFile`). |
 
 ---
 
@@ -76,20 +76,31 @@ automatically (~31 MB) before starting. Subsequent runs reuse it.
 | `-ChunkSize` | `500` | Files processed between manifest checkpoints (crash-safe/resumable). Chunks never span folders, and a folder bigger than this also reports progress part-way through. Lower it (e.g. `50`) for more frequent updates on slow settings like `-AvifSpeed 3`. |
 | `-MagickPath` | auto | Explicit path to `magick.exe`. If omitted, uses the portable copy / auto-download / PATH. |
 | `-NoDownload` | off | Do not auto-download a portable ImageMagick; use `magick` on PATH instead. |
+| `-StateFile` | `<source>\.photolib-manifest.jsonl` | Path to the resume manifest. Kept in the source root by default so it travels with the library and survives destination rebuilds. |
+| `-Verbose` | off | Log every image as it starts and finishes: worker thread id, elapsed time, source→output dimensions, quality (and AVIF speed), and size/ratio. |
 
 \* `heic` output requires an ImageMagick build with an HEVC **encoder**, which the
 official distribution does **not** include. See **Output format notes** below.
 
 ### How change-detection works
 
-State is recorded in `<destination>\.photolib-manifest.jsonl` (one JSON line per file).
-A source photo is (re)processed when any of these is true:
+State is recorded in `<source>\.photolib-manifest.jsonl` (one JSON line per file;
+override the location with `-StateFile`). Each entry stores the source's modified
+time and size, the **output path and the output file's modified time**, and the
+settings used. A source photo is (re)processed when any of these is true:
 
-- it is new, or its destination file is missing;
+- it is new;
+- the **output file is missing, or its recorded modified time no longer matches**
+  (e.g. a partial/interrupted write, or the output was edited/replaced);
 - the source's last-modified time changed (e.g. you edited GPS/EXIF);
 - `-MaxPixels`, `-Quality`, `-OutputFormat`, or `-AvifSpeed` differ from when it was
   last made (a format change also cleans up the stale old-extension file);
 - `-FullRefresh` is used.
+
+Otherwise the file is skipped immediately, so an interrupted run resumes cheaply.
+The manifest lives with the source library, so it survives destination rebuilds; a
+manifest left in the destination root by an older version is migrated automatically
+on first run.
 
 ### Progress reporting
 
@@ -142,6 +153,16 @@ yellow and shows a `FAILED` count.
 
 # Full rebuild:
 .\Compress-PhotoLibrary.ps1 -SourceFolder "D:\Photos" -DestinationFolder "E:\PhoneCopy" -FullRefresh
+
+# Verbose: log every image as it processes (thread id, timing, sizes):
+.\Compress-PhotoLibrary.ps1 -SourceFolder "D:\Photos" -DestinationFolder "E:\PhoneCopy" -OutputFormat avif -Verbose
+```
+
+With `-Verbose` each image logs a start and finish line:
+
+```
+  [t18] START 2019\holiday\IMG_0421.jpg
+  [t18] DONE  2019\holiday\IMG_0421.jpg  4000x3000 -> 2048x1536  q60  3.8 MB -> 612.4 KB (16%)  1.62s
 ```
 
 Full help: `Get-Help .\Compress-PhotoLibrary.ps1 -Full`
@@ -231,7 +252,9 @@ Always run `-EstimateOnly` against **your** library for a real number before a f
 
 - **AVIF encoding is CPU-heavy** (AV1). It parallelises across all cores but is slower
   per image than JPEG — fine for an overnight run, just not JPEG-fast.
-- The run is **resumable**: the manifest is checkpointed every `-ChunkSize` files, so an
-  interruption only re-does the current chunk.
+- The run is **resumable**: the manifest is checkpointed every `-ChunkSize` files and
+  kept in the source root, so an interruption only re-does the current chunk. On the
+  next run, files whose output still exists (with the recorded modified time) are
+  skipped immediately; anything whose source or output changed is reprocessed.
 - First real run: try it on **one sub-folder** (a few hundred photos) to confirm quality,
   size, and orientation look right on your phone before processing the whole library.
