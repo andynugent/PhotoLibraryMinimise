@@ -379,7 +379,19 @@ $totalSource = 0
 $unsupported = 0
 
 $enum = [System.IO.Directory]::EnumerateFiles($SourceFolder, '*', [System.IO.SearchOption]::AllDirectories)
+$seen = 0
 foreach ($path in $enum) {
+    # Scanning a six-figure library takes a while, so show signs of life. The
+    # progress bar updates often; the console line is a fallback for hosts that
+    # do not render Write-Progress (redirected output, transcripts, ISE).
+    $seen++
+    if (($seen % 500) -eq 0) {
+        Write-Progress -Activity "Scanning source" -Status ("{0:N0} files seen | {1:N0} to process | {2:N0} up to date" -f $seen, $work.Count, $skip)
+    }
+    if (($seen % 20000) -eq 0) {
+        Write-Host ("  scanned {0:N0} files ({1:N0} to process, {2:N0} up to date)..." -f $seen, $work.Count, $skip) -ForegroundColor DarkGray
+    }
+
     $ext = [System.IO.Path]::GetExtension($path).TrimStart('.')
     if (-not $extSet.Contains($ext)) { continue }
 
@@ -440,6 +452,7 @@ foreach ($path in $enum) {
     }
 }
 
+Write-Progress -Activity "Scanning source" -Completed
 Write-Host ("Found {0:N0} source images: {1:N0} to process, {2:N0} up to date." -f `
     $totalSource, $work.Count, $skip) -ForegroundColor Cyan
 if ($unsupported -gt 0) {
@@ -536,59 +549,119 @@ if ($work.Count -eq 0) {
 }
 
 # ---------------------------------------------------------------------------
-# Process in parallel, checkpointing the manifest after each chunk.
+# Process in parallel, folder by folder, checkpointing the manifest after each
+# chunk. Grouping the work by sub-folder means the console gets a completion
+# line at a natural boundary instead of going silent for hours.
 # ---------------------------------------------------------------------------
 $funcDef = ${function:Convert-OneImage}.ToString()
+
+# Group the queued work by sub-folder, keeping first-seen (enumeration) order.
+$folderOrder = [System.Collections.Generic.List[string]]::new()
+$byFolder = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[object]]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($w in $work) {
+    $fdir = [System.IO.Path]::GetDirectoryName($w.Rel)
+    if (-not $fdir) { $fdir = '.' }
+    $bucket = $null
+    if (-not $byFolder.TryGetValue($fdir, [ref]$bucket)) {
+        $bucket = [System.Collections.Generic.List[object]]::new()
+        $byFolder[$fdir] = $bucket
+        $folderOrder.Add($fdir)
+    }
+    $bucket.Add($w)
+}
 
 $processed = 0; $failed = 0
 $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
 $manifestWriter = [System.IO.StreamWriter]::new($ManifestPath, $true)  # append
 
+if ($work.Count -gt 0) {
+    Write-Host ("Processing {0:N0} image(s) across {1:N0} folder(s) with {2} parallel worker(s)..." -f `
+        $work.Count, $folderOrder.Count, $ThrottleLimit) -ForegroundColor Cyan
+}
+
 try {
     $total = $work.Count
-    for ($offset = 0; $offset -lt $total; $offset += $ChunkSize) {
-        $end = [Math]::Min($offset + $ChunkSize, $total)
-        $chunk = $work.GetRange($offset, $end - $offset)
+    $folderNo = 0
+    $folderTotal = $folderOrder.Count
 
-        $results = $chunk | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
-            ${function:Convert-OneImage} = $using:funcDef
-            $item = $_
-            $r = Convert-OneImage -Source $item.Source -Dest $item.Dest -OutExt $item.OutExt `
-                    -MaxPixels $using:MaxPixels -Quality $using:Quality -MagickExe $using:MagickPath -AvifSpeed $using:AvifSpeed
-            [pscustomobject]@{
-                Rel     = $item.Rel
-                WTicks  = $item.WTicks
-                SLen    = $item.SLen
-                OutExt  = $item.OutExt
-                Success = $r.Success
-                DLen    = $r.DestLength
-                Taken   = $r.TakenIso
-                Error   = $r.Error
-            }
-        }
+    foreach ($folderRel in $folderOrder) {
+        $folderNo++
+        $items = $byFolder[$folderRel]
+        $label = if ($folderRel -eq '.') { '<root>' } else { $folderRel }
 
-        foreach ($r in $results) {
-            if ($r.Success) {
-                $processed++
-                $entry = [pscustomobject]@{
-                    rel = $r.Rel; w = $r.WTicks; sl = $r.SLen
-                    dl = $r.DLen; t = $r.Taken; q = $Quality; mp = $MaxPixels; oe = $r.OutExt; sp = $AvifSpeed
+        $fSw = [System.Diagnostics.Stopwatch]::StartNew()
+        $fOk = 0; $fFail = 0; $fSrcBytes = 0.0; $fDstBytes = 0.0
+
+        for ($offset = 0; $offset -lt $items.Count; $offset += $ChunkSize) {
+            $end = [Math]::Min($offset + $ChunkSize, $items.Count)
+            $chunk = $items.GetRange($offset, $end - $offset)
+
+            $results = $chunk | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
+                ${function:Convert-OneImage} = $using:funcDef
+                $item = $_
+                $r = Convert-OneImage -Source $item.Source -Dest $item.Dest -OutExt $item.OutExt `
+                        -MaxPixels $using:MaxPixels -Quality $using:Quality -MagickExe $using:MagickPath -AvifSpeed $using:AvifSpeed
+                [pscustomobject]@{
+                    Rel     = $item.Rel
+                    WTicks  = $item.WTicks
+                    SLen    = $item.SLen
+                    OutExt  = $item.OutExt
+                    Success = $r.Success
+                    DLen    = $r.DestLength
+                    Taken   = $r.TakenIso
+                    Error   = $r.Error
                 }
-                $manifest[$r.Rel] = $entry
-                $manifestWriter.WriteLine(($entry | ConvertTo-Json -Compress -Depth 4))
-            } else {
-                $failed++
-                Write-Warning ("FAILED: {0} :: {1}" -f $r.Rel, $r.Error)
+            }
+
+            foreach ($r in $results) {
+                if ($r.Success) {
+                    $processed++; $fOk++
+                    $fSrcBytes += [double]$r.SLen
+                    $fDstBytes += [double]$r.DLen
+                    $entry = [pscustomobject]@{
+                        rel = $r.Rel; w = $r.WTicks; sl = $r.SLen
+                        dl = $r.DLen; t = $r.Taken; q = $Quality; mp = $MaxPixels; oe = $r.OutExt; sp = $AvifSpeed
+                    }
+                    $manifest[$r.Rel] = $entry
+                    $manifestWriter.WriteLine(($entry | ConvertTo-Json -Compress -Depth 4))
+                } else {
+                    $failed++; $fFail++
+                    Write-Warning ("FAILED: {0} :: {1}" -f $r.Rel, $r.Error)
+                }
+            }
+            $manifestWriter.Flush()
+
+            $done = $processed + $failed
+            $rate = if ($sw2.Elapsed.TotalSeconds -gt 0) { $done / $sw2.Elapsed.TotalSeconds } else { 0 }
+            $etaSec = if ($rate -gt 0) { ($total - $done) / $rate } else { 0 }
+            Write-Progress -Activity "Compressing photos" `
+                -Status ("{0:N0}/{1:N0} images | folder {2:N0}/{3:N0}: {4} | {5:N1}/s | ETA {6}" -f `
+                    $done, $total, $folderNo, $folderTotal, $label, $rate, ([timespan]::FromSeconds($etaSec).ToString('hh\:mm\:ss'))) `
+                -PercentComplete (($done / $total) * 100)
+
+            # A folder big enough to span several chunks would otherwise stay
+            # silent until it finished, so tick within it too.
+            if ($end -lt $items.Count) {
+                Write-Host ("    {0}: {1:N0}/{2:N0} in this folder..." -f $label, $end, $items.Count) -ForegroundColor DarkGray
             }
         }
-        $manifestWriter.Flush()
 
-        $done = $processed + $failed
-        $rate = if ($sw2.Elapsed.TotalSeconds -gt 0) { $done / $sw2.Elapsed.TotalSeconds } else { 0 }
-        $etaSec = if ($rate -gt 0) { ($total - $done) / $rate } else { 0 }
-        Write-Progress -Activity "Compressing photos" `
-            -Status ("{0:N0}/{1:N0}  ({2:N1}/s, ETA {3})" -f $done, $total, $rate, ([timespan]::FromSeconds($etaSec).ToString('hh\:mm\:ss'))) `
-            -PercentComplete (($done / $total) * 100)
+        $fSw.Stop()
+        $ratioTxt = if ($fSrcBytes -gt 0) { '{0:P0}' -f ($fDstBytes / $fSrcBytes) } else { 'n/a' }
+        $failTxt  = if ($fFail -gt 0) { ", {0:N0} FAILED" -f $fFail } else { '' }
+        $colour   = if ($fFail -gt 0) { 'Yellow' } else { 'Green' }
+        Write-Host ("[{0}/{1}] {2}  {3:N0} image(s){4}  {5} -> {6} ({7})  in {8}" -f `
+            $folderNo, $folderTotal, $label, $fOk, $failTxt,
+            (Format-Size $fSrcBytes), (Format-Size $fDstBytes), $ratioTxt,
+            $fSw.Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor $colour
+
+        $doneAll = $processed + $failed
+        $rateAll = if ($sw2.Elapsed.TotalSeconds -gt 0) { $doneAll / $sw2.Elapsed.TotalSeconds } else { 0 }
+        $etaAll  = if ($rateAll -gt 0) { ($total - $doneAll) / $rateAll } else { 0 }
+        Write-Host ("          total {0:N0}/{1:N0} ({2:P0})  {3:N1} img/s  elapsed {4}  ETA {5}" -f `
+            $doneAll, $total, ($doneAll / $total), $rateAll,
+            $sw2.Elapsed.ToString('hh\:mm\:ss'),
+            ([timespan]::FromSeconds($etaAll).ToString('hh\:mm\:ss'))) -ForegroundColor DarkGray
     }
 }
 finally {

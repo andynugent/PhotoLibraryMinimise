@@ -73,7 +73,7 @@ automatically (~31 MB) before starting. Subsequent runs reuse it.
 | `-Mirror` | off | Also delete destination files whose source no longer exists (exact mirror). |
 | `-Extensions` | common photo types | Source extensions to include (jpg, jpeg, png, tif, tiff, heic, heif, webp, bmp…). |
 | `-ThrottleLimit` | CPU cores | Parallel worker count. |
-| `-ChunkSize` | `500` | Files processed between manifest checkpoints (crash-safe/resumable). |
+| `-ChunkSize` | `500` | Files processed between manifest checkpoints (crash-safe/resumable). Chunks never span folders, and a folder bigger than this also reports progress part-way through. Lower it (e.g. `50`) for more frequent updates on slow settings like `-AvifSpeed 3`. |
 | `-MagickPath` | auto | Explicit path to `magick.exe`. If omitted, uses the portable copy / auto-download / PATH. |
 | `-NoDownload` | off | Do not auto-download a portable ImageMagick; use `magick` on PATH instead. |
 
@@ -90,6 +90,29 @@ A source photo is (re)processed when any of these is true:
 - `-MaxPixels`, `-Quality`, `-OutputFormat`, or `-AvifSpeed` differ from when it was
   last made (a format change also cleans up the stale old-extension file);
 - `-FullRefresh` is used.
+
+### Progress reporting
+
+Work is grouped by sub-folder and processed one folder at a time, so the console
+gets a line at every folder boundary rather than going quiet for hours:
+
+```
+Processing 98,431 image(s) across 347 folder(s) with 12 parallel worker(s)...
+[12/347] Amazon\2019  128 image(s)  310.24 MB -> 41.72 MB (13%)  in 00:04:12
+          total 5,120/98,431 (5%)  3.4 img/s  elapsed 00:25:04  ETA 07:35:11
+```
+
+- The `[n/total]` line reports the folder just finished: how many images, the
+  before/after size for that folder, and how long it took.
+- The indented line reports the whole run: images done, throughput, elapsed and ETA.
+- Folders larger than `-ChunkSize` also tick part-way through
+  (`Amazon\2019: 500/2,400 in this folder...`), and the initial scan reports every
+  20,000 files, so a six-figure library never looks stalled.
+- A live progress bar (`Write-Progress`) carries the same detail for hosts that
+  render it.
+
+Failed images are reported as warnings immediately, and the folder line turns
+yellow and shows a `FAILED` count.
 
 ### Examples
 

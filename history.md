@@ -159,3 +159,32 @@ that have been made — ideally a short title and a 1-3 line summary/description
 - No script changes. Recorded the standing agreement: every set of changes now ends
   with a suggested commit message (short imperative title + 1-3 line description) in
   a copyable code block. It is a suggestion only — nothing is committed unless asked.
+
+## 10. Progress reporting per folder
+
+**Prompt:** We need more progress information. Currently you get nothing while it's
+processing files — an update every time a folder is completed perhaps?
+
+**Changes:**
+- Reworked the processing loop in `Compress-PhotoLibrary.ps1` to group the queued
+  work by sub-folder (first-seen enumeration order preserved) and process one folder
+  at a time, chunking within a folder rather than across the whole queue. Chunks no
+  longer span folders, so manifest checkpointing is unchanged but every folder ends
+  at a reportable boundary.
+- On each completed folder it now prints two console lines: the folder's own result
+  (`[12/347] Amazon\2019  128 image(s)  310.24 MB -> 41.72 MB (13%)  in 00:04:12`)
+  and the run total (images done, percentage, images/sec, elapsed, ETA). The line
+  turns yellow with a `FAILED` count if any image in the folder failed.
+- Folders larger than `-ChunkSize` tick part-way through
+  (`Amazon\2019: 500/2,400 in this folder...`) so a single huge folder cannot go
+  silent.
+- The scan phase — previously silent for minutes on a large library — now updates
+  `Write-Progress` every 500 files and prints a console line every 20,000.
+- `Write-Progress` now also carries the folder number/name and ETA, for hosts that
+  render it; the console lines are the fallback for hosts that don't.
+- README: added a **Progress reporting** section with sample output, and noted that
+  `-ChunkSize` also controls the intra-folder tick (lower it for slow settings such
+  as `-AvifSpeed 3`).
+- Verified on a 4-folder test tree (nested sub-folder, root-level files,
+  `-ChunkSize 2`): per-folder lines, intra-folder ticks, correct folder names, and
+  an unchanged re-run still reports "nothing to do".
