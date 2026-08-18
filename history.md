@@ -188,3 +188,29 @@ processing files — an update every time a folder is completed perhaps?
 - Verified on a 4-folder test tree (nested sub-folder, root-level files,
   `-ChunkSize 2`): per-folder lines, intra-folder ticks, correct folder names, and
   an unchanged re-run still reports "nothing to do".
+
+## 11. Scan progress — "up to date" appears frozen
+
+**Prompt:** The "up to date" count when scanning doesn't get updated (the "to
+process" is lower as expected when some are already done).
+
+**Changes:**
+- Investigated with a 1,800-file test library and a deliberately truncated manifest
+  (simulating an interrupted run). The counter was arithmetically correct, but it
+  *looks* stuck: `EnumerateFiles` returns the previously-completed folders first, so
+  "up to date" races to its final value in the first moments of the scan and then
+  never moves again while "to process" keeps climbing. On a six-figure library that
+  is minutes of an apparently frozen number.
+- Rewrote the scan progress line so the buckets always reconcile and something on it
+  is always moving:
+  `40,000 files seen = 12,100 to process + 27,742 up to date + 158 other
+  [00:00:36 elapsed, 1,111 files/s]`.
+  Elapsed and files/s keep ticking even when the other counts plateau.
+- Added a `$nonImage` counter: files whose extension isn't in `-Extensions` were
+  previously invisible in the tally, so "seen" never matched the other numbers.
+  They now show up in `other` (together with files this ImageMagick build cannot
+  write) and are reported after the scan.
+- Factored the line into a `Format-ScanLine` helper shared by the progress bar, the
+  console fallback and the end-of-scan summary; the progress bar now updates every
+  200 files instead of every 500.
+- README: documented the scan line, what `other` means, and why "up to date" plateaus.

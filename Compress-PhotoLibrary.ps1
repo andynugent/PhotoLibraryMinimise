@@ -377,23 +377,39 @@ $work = [System.Collections.Generic.List[object]]::new()
 $skip = 0
 $totalSource = 0
 $unsupported = 0
+$nonImage = 0
 
+# Every file seen lands in exactly one of these buckets, so the scan line always
+# reconciles: seen = to process + up to date + non-image + unwritable.
+function Format-ScanLine {
+    param([long] $Seen, [int] $ToDo, [int] $UpToDate, [int] $NonImage, [int] $Unwritable, [timespan] $Elapsed)
+    $other = $NonImage + $Unwritable
+    $rate  = if ($Elapsed.TotalSeconds -gt 0) { $Seen / $Elapsed.TotalSeconds } else { 0 }
+    return ("{0:N0} files seen = {1:N0} to process + {2:N0} up to date + {3:N0} other  [{4} elapsed, {5:N0} files/s]" -f `
+        $Seen, $ToDo, $UpToDate, $other, $Elapsed.ToString('hh\:mm\:ss'), $rate)
+}
+
+$scanSw = [System.Diagnostics.Stopwatch]::StartNew()
 $enum = [System.IO.Directory]::EnumerateFiles($SourceFolder, '*', [System.IO.SearchOption]::AllDirectories)
 $seen = 0
 foreach ($path in $enum) {
-    # Scanning a six-figure library takes a while, so show signs of life. The
-    # progress bar updates often; the console line is a fallback for hosts that
-    # do not render Write-Progress (redirected output, transcripts, ISE).
+    # Scanning a six-figure library takes a while, so show signs of life. Note
+    # that "up to date" usually races to its final value and then sits still,
+    # because the folders done on a previous run are enumerated first - hence
+    # the elapsed time and file rate, which keep moving either way.
     $seen++
-    if (($seen % 500) -eq 0) {
-        Write-Progress -Activity "Scanning source" -Status ("{0:N0} files seen | {1:N0} to process | {2:N0} up to date" -f $seen, $work.Count, $skip)
+    if (($seen % 200) -eq 0) {
+        Write-Progress -Activity "Scanning source" `
+            -Status (Format-ScanLine -Seen $seen -ToDo $work.Count -UpToDate $skip -NonImage $nonImage -Unwritable $unsupported -Elapsed $scanSw.Elapsed)
     }
+    # Console fallback for hosts that do not render Write-Progress (redirected
+    # output, transcripts, ISE).
     if (($seen % 20000) -eq 0) {
-        Write-Host ("  scanned {0:N0} files ({1:N0} to process, {2:N0} up to date)..." -f $seen, $work.Count, $skip) -ForegroundColor DarkGray
+        Write-Host ("  " + (Format-ScanLine -Seen $seen -ToDo $work.Count -UpToDate $skip -NonImage $nonImage -Unwritable $unsupported -Elapsed $scanSw.Elapsed)) -ForegroundColor DarkGray
     }
 
     $ext = [System.IO.Path]::GetExtension($path).TrimStart('.')
-    if (-not $extSet.Contains($ext)) { continue }
+    if (-not $extSet.Contains($ext)) { $nonImage++; continue }
 
     # Determine the output extension for this file and confirm it is writable.
     # ('same' can hit read-only source formats such as HEIC on this build.)
@@ -452,9 +468,14 @@ foreach ($path in $enum) {
     }
 }
 
+$scanSw.Stop()
 Write-Progress -Activity "Scanning source" -Completed
+Write-Host ("  " + (Format-ScanLine -Seen $seen -ToDo $work.Count -UpToDate $skip -NonImage $nonImage -Unwritable $unsupported -Elapsed $scanSw.Elapsed)) -ForegroundColor DarkGray
 Write-Host ("Found {0:N0} source images: {1:N0} to process, {2:N0} up to date." -f `
     $totalSource, $work.Count, $skip) -ForegroundColor Cyan
+if ($nonImage -gt 0) {
+    Write-Host ("  ({0:N0} non-image file(s) ignored.)" -f $nonImage) -ForegroundColor DarkGray
+}
 if ($unsupported -gt 0) {
     Write-Warning ("{0:N0} file(s) skipped because this build cannot write their format. Use -OutputFormat avif to include them." -f $unsupported)
 }

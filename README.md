@@ -106,8 +106,19 @@ Processing 98,431 image(s) across 347 folder(s) with 12 parallel worker(s)...
   before/after size for that folder, and how long it took.
 - The indented line reports the whole run: images done, throughput, elapsed and ETA.
 - Folders larger than `-ChunkSize` also tick part-way through
-  (`Amazon\2019: 500/2,400 in this folder...`), and the initial scan reports every
-  20,000 files, so a six-figure library never looks stalled.
+  (`Amazon\2019: 500/2,400 in this folder...`).
+
+The scan that runs first reports as it goes, in buckets that always add up:
+
+```
+  40,000 files seen = 12,100 to process + 27,742 up to date + 158 other  [00:00:36 elapsed, 1,111 files/s]
+```
+
+`other` = files that aren't in `-Extensions` plus any this ImageMagick build can't
+write. Note that **up to date usually stops rising early** and then sits still: the
+folders finished on a previous run are enumerated first, so that bucket fills up
+immediately while `to process` keeps climbing. The elapsed time and file rate keep
+moving regardless, so you can tell the scan is alive.
 - A live progress bar (`Write-Progress`) carries the same detail for hosts that
   render it.
 
